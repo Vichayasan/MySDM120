@@ -1,7 +1,7 @@
 #define TINY_GSM_MODEM_BG96 // EC25
 
 #include <Arduino.h>
-// #include <ArduinoJson.h>
+#include <ArduinoJson.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <EEPROM.h>
@@ -9,12 +9,14 @@
 #include "REG_SDM120.h"
 #include <ModbusMaster.h>
 #include <HardwareSerial.h>
-#include <MAGELLAN_MQTT.h>
+// #include <MAGELLAN_MQTT.h>
 #include <TinyGsmClient.h>
 #include <ArduinoHttpClient.h>
 #include <SSLClient.h>
 #include <HTTPClientESP32.h>
 #include <ArduinoOTA.h>
+#include "SPIFFS.h"
+#include <PubSubClient.h>
 
 #define trigWDTPin    32
 #define ledHeartPIN   0
@@ -45,8 +47,14 @@ TinyGsmClient gsm_mqtt_client(modem, 0);
 
 WiFiManager wifiManager;
 WiFiClient WiFi_client;
-MAGELLAN_MQTT magelWiFi(WiFi_client);
-MAGELLAN_MQTT magelGSM(gsm_mqtt_client);
+
+//AIS Magellan
+// MAGELLAN_MQTT magelWiFi(WiFi_client);
+// MAGELLAN_MQTT magelGSM(gsm_mqtt_client);
+
+//PubSubclient
+PubSubClient mqttWiFi(WiFi_client);
+PubSubClient mqttGSM(gsm_mqtt_client);
 
 // HTTPS Transport OTA
 TinyGsmClient base_client(modem, 1);
@@ -54,13 +62,23 @@ SSLClient secure_layer(&base_client);
 HttpClient GSMclient = HttpClient(secure_layer, serverOTA, port);
 
 String json, deviceToken;
+String digitsOnlyToken = ""; // Create a new string for the digits
+
+// interval sec.
 unsigned long previousMillis = 0;
 unsigned long periodOTA = 0;
+uint32_t lastReconnectAttempt = 0;
+
+//loop count
+unsigned int CountPing = 0;
+#define pingCount 5 // Error time count 5 to reset
 
 boolean GSMnetwork = false;
 boolean GSMgprs = false;
 bool connectWifi = false;
-bool resultSub = false;
+
+//AIS Magellan
+// bool resultSub = false;
 
 // Your GPRS credentials
 const char apn[] = "internet";
@@ -68,11 +86,21 @@ const char user[] = "";
 const char pass[] = "";
 
 String new_version;
-const char version_url[] = "";//"/Vichayasan/BMA/refs/heads/main/TX/bin_version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
-const char* version_url_WiFiOTA = "";//"https://raw.githubusercontent.com/Vichayasan/BMA/refs/heads/main/TX/bin_version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
+const char version_url[] = "/Vichayasan/MySDM120/main/bin_version.txt";//"/Vichayasan/BMA/refs/heads/main/TX/bin_version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
+const char* version_url_WiFiOTA = "https://raw.githubusercontent.com/Vichayasan/MySDM120/main/bin_version.txt";//"https://raw.githubusercontent.com/Vichayasan/BMA/refs/heads/main/TX/bin_version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
 
 String firmware_url;
-String current_version = "0.0.1";
+String current_version = "0.0.4";
+
+//For PubSub
+const char *magellanServer = "magellan.ais.co.th"; //"device-entmagellan.ais.co.th"
+String user_mqtt = "Vichayasan";
+String key = "1000000"; //3C61056B4894
+String secret = "200";
+String mqttStatus = "";
+bool pubReqStatus;
+bool subRespStatus;
+String token = "";
 
 void t1CallgetMeter();
 void t2CallsendViaNBIOT();
@@ -110,6 +138,8 @@ struct Meter
   String sdmVolt;
   String sdmCurrent;
   String sdmPF; //Power factor
+
+  int16_t gsmRSSI;
 
 };
 Meter meter;
@@ -247,7 +277,7 @@ void configModeCallback(WiFiManager *myWiFiManager)
 
 void _initWiFi(){
   // WiFi.mode(WIFI_AP_STA); // Correct
-  String host = "Mcgellan-" + deviceToken;
+  String host = "AIS-Thor-" + deviceToken;
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setConfigPortalTimeout(60); // auto close configportal after n seconds
   wifiManager.setAPClientCheck(true);     // avoid timeout if client connected to softap
@@ -275,29 +305,47 @@ void getMac()
   deviceToken.toUpperCase();
   // ESPUI.updateLabel(GUI.idLabel, String(deviceToken));
 
+  // --- NEW CODE TO EXTRACT DIGITS ---
+  for (int i = 0; i < deviceToken.length(); i++) {
+    // Check if the character at the current position is a digit
+    if (isDigit(deviceToken.charAt(i))) {
+      // If it is a digit, add it to our new string
+      digitsOnlyToken += deviceToken.charAt(i);
+    }
+  }
+
 }
 
 void _initMagel(){
   Serial.println();
   Serial.println("debug magel 01");
-  setting.ThingIdentifier = "67103330522117731051068";
-  setting.ThingSecret = "18810218412214560";
-  setting.endpoint = "magellan.ais.co.th"; //if not set *default: magellan.ais.co.th
+  // setting.ThingIdentifier = "585099001736342820167992";
+  // setting.ThingSecret = "58509900173634282016";
+  // setting.endpoint = "magellan.ais.co.th"; //if not set *default: magellan.ais.co.th
+  // setting.clientBufferSize = defaultBuffer;
+  // // setting.clientBufferSize = defaultOTABuffer;
 
   HeartBeat();
 
   if (connectWifi){
+    //  magelWiFi.begin(setting);
 
-     magelWiFi.begin(setting);
+    //  magelWiFi.getServerConfig("autoUpdate", [](String resp){
+    //   magelWiFi.OTA.autoUpdate(false);
+    // //magel.OTA.getAutoUpdate() is return TRUE if set autoUpdate, FALSE if set manualUpdate
+    //   magelWiFi.clientConfig.add("autoUpdateMode", ((magelWiFi.OTA.getAutoUpdate())? "ENABLE" : "DISABLE"));
+    //   magelWiFi.clientConfig.save(); // update client config from device to thing optional
+    //   });
+
      Serial.println();
      Serial.println("debug magel 02");
-     magelWiFi.getControlJSON([](String controls){ 
-      Serial.print("# Control incoming JSON: ");
-      Serial.println(controls);
-      String control = magelWiFi.deserializeControl(controls);
-      magelWiFi.control.ACK(control); //ACKNOWLEDGE control to magellan ⚠️ important to Acknowledge control value to platform
-    });
-    Serial.println("Thing Token: " + magelWiFi.info.getThingToken());
+    //  magelWiFi.getControlJSON([](String controls){ 
+    //   Serial.print("# Control incoming JSON: ");
+    //   Serial.println(controls);
+    //   String control = magelWiFi.deserializeControl(controls);
+    //   magelWiFi.control.ACK(control); //ACKNOWLEDGE control to magellan ⚠️ important to Acknowledge control value to platform
+    // });
+    // Serial.println("Thing Token: " + magelWiFi.info.getThingToken());
 
   }else{
 
@@ -306,16 +354,24 @@ void _initMagel(){
     //   Serial.println("magel: fail");
     //   }
     // magelGSM.setServer("magellan.ais.co.th", 1883);
-    magelGSM.begin(setting);
+    
+    // magelGSM.begin(setting);
 
-    magelGSM.getControlJSON([](String controls){ 
-      Serial.print("# Control incoming JSON: ");
-      Serial.println(controls);
-      String control = magelGSM.deserializeControl(controls);
-      magelGSM.control.ACK(control); //ACKNOWLEDGE control to magellan ⚠️ important to Acknowledge control value to platform
+    // magelGSM.getServerConfig("autoUpdate", [](String resp){
+    //   magelGSM.OTA.autoUpdate(false);
+    // //magel.OTA.getAutoUpdate() is return TRUE if set autoUpdate, FALSE if set manualUpdate
+    //   magelGSM.clientConfig.add("autoUpdateMode", ((magelGSM.OTA.getAutoUpdate())? "ENABLE" : "DISABLE"));
+    //   magelGSM.clientConfig.save(); // update client config from device to thing optional
+    //   });
+
+    // magelGSM.getControlJSON([](String controls){ 
+    //   Serial.print("# Control incoming JSON: ");
+    //   Serial.println(controls);
+    //   String control = magelGSM.deserializeControl(controls);
+    //   magelGSM.control.ACK(control); //ACKNOWLEDGE control to magellan ⚠️ important to Acknowledge control value to platform
       
-    });
-    Serial.println("Thing Token: " + magelGSM.info.getThingToken());
+    // });
+    // Serial.println("Thing Token: " + magelGSM.info.getThingToken());
     }
 
   // setting.clientBufferSize = defaultOTAbuffer; // if not set *default: 1024
@@ -339,6 +395,7 @@ void _initMagel(){
   // Serial.println("ThingSecret: "+ magel.credential.getThingSecret());
   // Serial.println("PreviousThingIdentifier: "+ magel.credential.getPreviousThingIdentifier());
   // Serial.println("PreviousThingSecret: "+ magel.credential.getPreviousThingSecret());
+
   Serial.println();
 }
 
@@ -372,7 +429,7 @@ bool checkForUpdate(String &firmware_url)
   if (new_version != current_version)
   {
     Serial.println("New version available. Updating...");
-    firmware_url = String("/Vichayasan/BMA/refs/heads/main/TX/firmware") + new_version + ".bin";
+    firmware_url = String("/Vichayasan/MySDM120/main/firmware") + new_version + ".bin";// ***WITHOUT "/raw"***
     Serial.println("Firmware URL: " + firmware_url);
     return true;
   }
@@ -525,7 +582,7 @@ bool WiFicheckForUpdate(String &firmware_url)
     if (new_version != current_version)
     {
       Serial.println("New version available. Updating...");
-      firmware_url = String("https://raw.githubusercontent.com/Vichayasan/BMA/refs/heads/main/TX/firmware") + new_version + ".bin";
+      firmware_url = String("https://raw.githubusercontent.com/Vichayasan/MySDM120/main/firmware") + new_version + ".bin";
       Serial.println("Firmware URL: " + firmware_url);
       return true;
     }
@@ -620,10 +677,122 @@ void WiFi_OTA()
 
   if (WiFicheckForUpdate(firmware_url))
   {
+
     WiFiperformOTA(firmware_url.c_str());
   }
 }
 
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.println("debud call back");
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+
+  // Convert payload to a String
+  String jsonString;
+  for (int i = 0; i < length; i++) {
+    jsonString += (char)payload[i];
+  }
+  Serial.println(jsonString);  // Debugging: Print the received JSON
+
+  // Parse JSON
+  StaticJsonDocument<200> doc;
+  DeserializationError error = deserializeJson(doc, jsonString);
+
+  if (error) {
+    Serial.print("JSON Parsing failed: ");
+    Serial.println(error.f_str());
+    return;
+  }
+
+  token = doc["ThingToken"].as<String>();
+
+  Serial.println("Token: " + token);
+}
+
+void requestThingToken(String topic){
+  String json;
+  Serial.println("request Topic: " + topic);
+
+  int str_len = 5;
+  char char_array[str_len];
+  json.toCharArray(char_array, str_len);
+  
+  if (connectWifi){
+    pubReqStatus = mqttWiFi.publish(topic.c_str(), char_array);
+    Serial.print("requestThingToken: ");
+    Serial.println(pubReqStatus);
+    // Serial.println(pubReqStatus?"Succeed":"Fail");
+  }else{
+    pubReqStatus = mqttGSM.publish(topic.c_str(), char_array);
+    Serial.print("requestThingToken: ");
+    Serial.println(pubReqStatus);
+    // Serial.println(pubReqStatus?"Succeed":"Fail");
+  }
+}
+
+boolean reconnectWiFiMqtt()
+{
+
+  Serial.print("Connecting to ");
+  Serial.println(String(magellanServer));
+
+  boolean status = mqttWiFi.connect(user_mqtt.c_str(), key.c_str(), secret.c_str());
+  // boolean status = GSMmqtt.connect("GreenIO", "1665032200000000000", "166522000000000");
+
+  if (status == false)
+  {
+    Serial.println(" fail");
+    mqttStatus = "Failed to Connect Server with WiFi!";
+    return false;
+  }
+  Serial.println(" success");
+  mqttStatus = "Succeed to Connect Server with WiFi!";
+  Serial.println(F("Connect MQTT Success."));
+  Serial.println("user: " + user_mqtt);
+  Serial.println("Key: " + key);
+  Serial.println("Secret: " + secret);
+  String topicReq = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/req";
+  String topicRes = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/resp";
+  
+  Serial.println("topic Response: " + topicRes);
+  subRespStatus = mqttWiFi.subscribe(topicRes.c_str());
+  Serial.print("Token Response:");
+  Serial.println(subRespStatus);
+  requestThingToken(topicReq);
+  // mqttWiFi.subscribe(("api/v2/thing/" + token + "/delta/resp").c_str());
+  return mqttWiFi.connected();
+}
+
+boolean reconnectGSMMqtt()
+{
+  Serial.print("Connecting to ");
+  Serial.println(String(magellanServer));
+  boolean status = mqttGSM.connect(user_mqtt.c_str(), key.c_str(), secret.c_str());
+  // boolean status = GSMmqtt.connect("GreenIO", "1665032200000000000", "166522000000000");
+
+  if (status == false)
+  {
+    Serial.println(" fail");
+    return false;
+  }
+  Serial.println(" success");
+  Serial.println(F("Connect MQTT Success."));
+  Serial.println("user: " + user_mqtt);
+  Serial.println("Key: " + key);
+  Serial.println("Secret: " + secret);
+  String topicReq = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/req";
+  String topicRes = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/resp";
+  
+  Serial.println("topic Response: " + topicRes);
+  subRespStatus = mqttGSM.subscribe(topicRes.c_str());
+  Serial.print("Token Response:");
+  Serial.println(subRespStatus);
+  requestThingToken(topicReq);
+  String AAA = "thing";
+  // mqttWiFi.subscribe(("api/v2/thing/"+ key + "/" + secret + "/auth/resp").c_str());
+  return mqttGSM.connected();
+}
 
 //**************************************************************************************************************
 void setup() {
@@ -638,6 +807,10 @@ void setup() {
   digitalWrite(GSM_RESET, HIGH);
 
   Serial.begin(115200);
+
+  getMac();
+  secure_layer.setInsecure();
+
   SerialAT.begin(UART_BAUD, SERIAL_8N1, MODEM_RX, MODEM_TX);
   modem.sendAT("+QCFG=\"roamservice\",2");
   modem.testAT();
@@ -646,7 +819,7 @@ void setup() {
   // Serial.println("debug 01");
 
   modem.init();
-  delay(30000);
+  // delay(30000);
 
   SerialMon.println("Initializing modem...");
 
@@ -657,9 +830,9 @@ void setup() {
   Serial.println();
   Serial.println("debug 02");
   Serial.println();
-  HeartBeat();
+  // HeartBeat();
 
-  delay(30000);
+  // delay(30000);
 
   Serial.print("Waiting for network...");
   if (!modem.waitForNetwork())
@@ -673,24 +846,23 @@ void setup() {
   else
   {
     GSMnetwork = true;
+    
     Serial.println(" OK");
-
+    Serial.println();
+    Serial.print("GSM RSSI: ");
+    Serial.println(modem.getSignalQuality());
+    Serial.print("SimCCID: ");
+    Serial.println(modem.getSimCCID());
+    Serial.print("SimStatus: ");
+    Serial.println(modem.getSimStatus());
+    Serial.print("RegistrationStatus: ");
+    Serial.println(modem.getRegistrationStatus());
+    Serial.println();
 
   }
-  // delay(2000);
-
-  Serial.println();
-  Serial.print("GSM RSSI: ");
-  Serial.println(modem.getSignalQuality());
-  Serial.print("SimCCID: ");
-  Serial.println(modem.getSimCCID());
-  Serial.print("SimStatus: ");
-  Serial.println(modem.getSimStatus());
-  Serial.print("RegistrationStatus: ");
-  Serial.println(modem.getRegistrationStatus());
-  Serial.println();
-  delay(30000);
-  HeartBeat();
+  delay(2000);
+  // delay(30000);
+  // HeartBeat();
 
   if (GSMnetwork)
   {
@@ -727,25 +899,44 @@ void setup() {
   Serial.println();
   delay(2000);
 
+  // user_mqtt.concat(digitsOnlyToken.c_str());
+  key.concat(digitsOnlyToken.c_str());
+  secret.concat(digitsOnlyToken.c_str());
+  // printlnSerial("Token: " + token);
+  Serial.println("user: " + user_mqtt);
+  Serial.println("Key: " + key);
+  Serial.println("Secret: " + secret);
+
   if (connectWifi){
+    // wifiManager.resetSettings();
     _initWiFi();
+    Serial.printf("Wi-Fi RSSI: %d \n", WiFi.RSSI() );
+    mqttWiFi.setServer(magellanServer, 1883);
+    mqttWiFi.setCallback(callback);
+    reconnectWiFiMqtt();
+
+    WiFi_OTA();
+
+  }else{
+    mqttGSM.setServer(magellanServer, 1883);
+    mqttGSM.setCallback(callback);
+    reconnectGSMMqtt();
+
+    GSM_OTA();
   }
 
-  Serial.printf("Wi-Fi RSSI: %d \n", WiFi.RSSI() );
-
-  getMac();
+  
 
   modbus.begin(2400, SERIAL_8N1, 16, 17);
   // communicate with Modbus slave ID 1 over Serial (port 2)
   node.begin(1, modbus);
 
-  _initMagel();
-  Serial.println();
+  // _initMagel();
 
   Serial.println();
   Serial.println(F("***********************************"));
 
-  HeartBeat();
+  // HeartBeat();
 //  runner.init();
 
 //  runner.addTask(t1);
@@ -761,7 +952,6 @@ void setup() {
 //  t2.enable();  Serial.println("Enabled t2");
 //  t3.enable();  Serial.println("Enabled t3");
   //  t4.enable();  Serial.println("Enabled t4");
-  secure_layer.setInsecure();
 
 }
 
@@ -771,27 +961,106 @@ void loop() {
   //runner.execute();
   if(connectWifi){
 
-    magelWiFi.loop();
-
-    if(!magelWiFi.isConnected()) //*
-      {
-        magelWiFi.reconnect();
-      }
-    
+    // magelWiFi.loop();
+    // if(!magelWiFi.isConnected()){
+    //     magelWiFi.reconnect();
+    //   }
     // magelWiFi.interval(10, [](){
+    // });
 
-    // }
-  
-  // );
+    if (!mqttWiFi.connected())
+    {
+      Serial.println("=== WiFi MQTT NOT CONNECTED ===");
+      // Reconnect every 10 seconds
+      uint32_t t = millis() / 1000;
+      if (t - lastReconnectAttempt >= 30)
+      {
+        lastReconnectAttempt = t;
+        if (CountPing >= pingCount)
+        {
+          CountPing = 0;
+          ESP.restart();
+        }
+        CountPing++;
+
+        if (reconnectWiFiMqtt())
+        {
+          CountPing = 0;
+          lastReconnectAttempt = 0;
+        }
+      }
+      delay(100);
+      return;
+    }
+    mqttWiFi.loop();
+
 
   }else{
 
-    magelGSM.loop();
+    // magelGSM.loop();
+    // if(!magelGSM.isConnected()){
+    //     magelGSM.reconnect();
+    //   }
 
-    if(!magelGSM.isConnected()) //*
+    if (!modem.isNetworkConnected())
+    {
+      SerialMon.println("Network disconnected");
+      if (!modem.waitForNetwork(180000L, true))
       {
-        magelGSM.reconnect();
+        SerialMon.println(" fail");
+        delay(10000);
+        return;
       }
+      if (modem.isNetworkConnected())
+      {
+        SerialMon.println("Network re-connected");
+      }
+      // and make sure GPRS/EPS is still connected
+      if (!modem.isGprsConnected())
+      {
+        SerialMon.println("GPRS disconnected!");
+        SerialMon.print(F("Connecting to "));
+        SerialMon.print(apn);
+        if (!modem.gprsConnect(apn, user, pass))
+        {
+          SerialMon.println(" fail");
+          delay(10000);
+          return;
+        }
+        if (modem.isGprsConnected())
+        {
+          SerialMon.println("GPRS reconnected");
+        }
+      }
+    }
+
+    if (!mqttGSM.connected())
+    {
+      SerialMon.println("=== GSM MQTT NOT CONNECTED ===");
+      // Reconnect every 10 seconds
+      uint32_t t = millis() / 1000;
+      if (t - lastReconnectAttempt >= 30)
+      {
+        lastReconnectAttempt = t;
+
+        if (CountPing >= pingCount)
+        {
+          CountPing = 0;
+          ESP.restart();
+        }
+        CountPing++;
+
+        if (reconnectGSMMqtt())
+        {
+          CountPing = 0;
+          lastReconnectAttempt = 0;
+        }
+      }
+      delay(100);
+      return;
+    }
+
+    mqttGSM.loop();
 
   }
 
@@ -801,94 +1070,92 @@ void loop() {
     previousMillis = currentMillis;
 
     Serial.println("debug loop sender 01");
+    Serial.print("Used space: ");
+    Serial.print(SPIFFS.usedBytes());
+    Serial.println(" Bytes");
     readMeter() ;
+    Serial.print("Used space: ");
+    Serial.print(SPIFFS.usedBytes());
+    Serial.println(" Bytes");
  
   //  GET_METER();
     Serial.println();
   
-  //   String json = "";
-  //   json.concat("{\"Tn\":\"");
-  //   json.concat(deviceToken);
-  //   json.concat("\",\"vol\":");
-  //   json.concat(meter.sdmVolt);
-  //   json.concat(",\"cur\":");
-  //   json.concat(meter.sdmCurrent);
-  // //  json.concat(",\"ap\":");
-  // //  json.concat(DATA_METER[2]);
-  //  json.concat(",\"pf\":");
-  //  json.concat(meter.sdmPF);
-  //  json.concat(",\"f\":");
-  //  json.concat(meter.freq);
-  // //  json.concat(",\"TAE\":");
-  // //  json.concat(DATA_METER[5]);
-  //   json.concat("}");
-  //   Serial.println(json);
+    String json = "";
+    json.concat("{\"Tn\":\"");
+    json.concat(deviceToken);
 
-    // int str_len = json.length() + 1;
-    // char char_array[str_len];
-    // json.toCharArray(char_array, str_len);
-    // String msg = json.toJSONString();
+    if (connectWifi){
+      json.concat("\",\"Network\":\"");
+      json.concat("Wi-Fi");
+      json.concat("\",\"WiFi_RSSI\":");
+      json.concat(WiFi.RSSI());
+      json.concat(",\"version\":\"");
+      json.concat(current_version);
+    }else{
+      json.concat("\",\"Network\":\"");
+      json.concat("GSM");
+      json.concat("\",\"GSM_RSSI\":");
+      json.concat(modem.getSignalQuality());
+      json.concat(",\"version\":\"");
+      json.concat(current_version);
+    }
+    json.concat("\",\"vol\":");
+    json.concat(meter.sdmVolt);
+    json.concat(",\"cur\":");
+    json.concat(meter.sdmCurrent);
+  //  json.concat(",\"ap\":");
+  //  json.concat(DATA_METER[2]);
+   json.concat(",\"pf\":");
+   json.concat(meter.sdmPF);
+   json.concat(",\"f\":");
+   json.concat(meter.freq);
+  //  json.concat(",\"TAE\":");
+  //  json.concat(DATA_METER[5]);
+    json.concat("}");
+    Serial.println(json);
+
+    int str_len = json.length() + 1;
+    char char_array[str_len];
+    json.toCharArray(char_array, str_len);
+    
+    String topic = "api/v2/thing/" + token + "/report/persist";
 
     if (connectWifi)
     {
 
       Serial.println("debug loop sender wifi 02");
+      // resultSub = magelWiFi.report.send("{\"DeviceToken\":\"" + String(deviceToken) + "\",\"Network\":\"Wi-Fi\",\"WiFi_RSSI\":" + String(WiFi.RSSI()) + ",\"version\":\"" + String(current_version) + "\",\"volt\":" + String(meter.sdmVolt) + ",\"current\":" + String(meter.sdmCurrent) + ",\"PowerFactor\":" + String(meter.sdmPF) + ",\"frequency\":" + String(meter.freq) + "}"); //send data sensor with manual json format
+      // Serial.print("[Status report]: ");
+      // Serial.println((resultSub)? "Sending via Wi-Fi SUCCESS" : "Sending via Wi-Fi FAIL");
 
-      // magelWiFi.loop();
-      magelWiFi.subscribes([](){ //*lambda function
-      magelWiFi.subscribe.control();
-      magelWiFi.subscribe.report.response();
-      Serial.println("Subscribe list!!!");
-      /* subscribe something or doing something at once after connect/reconnect */
-      // magelWiFi.report.send(json.toJSONString());
-
-      // magelWiFi.sensor.add("volt", meter.sdmVolt);
-      // magelWiFi.sensor.add("current", meter.sdmCurrent);
-      // magelWiFi.sensor.add("powerFactor", meter.sdmPF);
-      // magelWiFi.sensor.add("frequency", meter.freq);
-      // magelWiFi.sensor.report();
-
-      Serial.println("debug loop sender wifi 02");
-
-     });
-      resultSub = magelWiFi.report.send("{\"DeviceToken\":\"" + String(deviceToken) + "\",\"Network\":\"Wi-Fi\",\"volt\":" + String(meter.sdmVolt) + ",\"current\":" + String(meter.sdmCurrent) + ",\"PowerFactor\":" + String(meter.sdmPF) + ",\"frequency\":" + String(meter.freq) + "}"); //send data sensor with manual json format
-      Serial.print("[Status report]: ");
-      Serial.println((resultSub)? "Sending via Wi-Fi SUCCESS" : "Sending via Wi-Fi FAIL");
+      mqttWiFi.publish(topic.c_str(), char_array);
 
       Serial.println("debug loop sender wifi 03");
 
     }else{
 
       Serial.println("debug loop sender GSM 01");
-      // magelGSM.loop();
-      magelGSM.subscribes([](){ //*lambda function
-      magelGSM.subscribe.control();
-      magelGSM.subscribe.report.response();
-      Serial.println("Subscribe list!!!");
-      /* subscribe something or doing something at once after connect/reconnect */
-      // magelGSM.report.send(json.toJSONString());
-
-      // magelGSM.sensor.add("volt", meter.sdmVolt);
-      // magelGSM.sensor.add("current", meter.sdmCurrent);
-      // magelGSM.sensor.add("powerFactor", meter.sdmPF);
-      // magelGSM.sensor.add("frequency", meter.freq);
-      // magelGSM.sensor.report();
-
-     Serial.println("debug loop sender GSM 02");
-
-     
-      });
-      resultSub = magelGSM.report.send("{\"DeviceToken\":\"" + String(deviceToken) + "\",\"Network\":\"GSM\",\"volt\":" + String(meter.sdmVolt) + ",\"current\":" + String(meter.sdmCurrent) + ",\"PowerFactor\":" + String(meter.sdmPF) + ",\"frequency\":" + String(meter.freq) + "}"); //send data sensor with manual json format
-      Serial.print("[Status report]: ");
-      Serial.println((resultSub)? "Sending via GSM SUCCESS" : "Sending via GSM FAIL");
-      Serial.println("debug loop sender GSM 03");
+      // resultSub = magelGSM.report.send("{\"DeviceToken\":\"" + String(deviceToken) + "\",\"Network\":\"GSM\",\"GSM_RSSI\":" + String(modem.getSignalQuality()) + ",\"version\":\"" + String(current_version) + "\",\"volt\":" + String(meter.sdmVolt) + ",\"current\":" + String(meter.sdmCurrent) + ",\"PowerFactor\":" + String(meter.sdmPF) + ",\"frequency\":" + String(meter.freq) + "}"); //send data sensor with manual json format
+      // Serial.print("[Status report]: ");
+      // Serial.println((resultSub)? "Sending via GSM SUCCESS" : "Sending via GSM FAIL");
+      // Serial.println("debug loop sender GSM 03");
+      mqttGSM.publish(topic.c_str(), char_array);
 
     }
+
+    Serial.print("Used space: ");
+    Serial.print(SPIFFS.usedBytes());
+    Serial.println(" Bytes");
 
   }
 
   if (currentMillis - periodOTA >= 60000){
     periodOTA = currentMillis;
+    Serial.print("Used space: ");
+    Serial.print(SPIFFS.usedBytes());
+    Serial.println(" Bytes");
+
     if (connectWifi){
         WiFi_OTA();
       }else{
@@ -897,7 +1164,6 @@ void loop() {
   }
   
 }
-
 
 void HeartBeat() {
   // Sink current to drain charge from watchdog circuit
