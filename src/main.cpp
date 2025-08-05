@@ -1,4 +1,6 @@
 #define TINY_GSM_MODEM_BG96 // EC25
+#define TINY_GSM_TEST_GPS true
+#define TINY_GSM_TEST_GPRS true
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -17,10 +19,11 @@
 #include <ArduinoOTA.h>
 #include "SPIFFS.h"
 #include <PubSubClient.h>
+#include <ESPUI.h>
+// #include <BluetoothSerial.h>
 
 #define trigWDTPin    32
 #define ledHeartPIN   0
-#define REGEN_BY_CONDITION false
 #define UART_BAUD 115200
 #define WDTPin 33 // Watch Dog pin for Trig
 
@@ -61,12 +64,13 @@ TinyGsmClient base_client(modem, 1);
 SSLClient secure_layer(&base_client);
 HttpClient GSMclient = HttpClient(secure_layer, serverOTA, port);
 
+// BluetoothSerial SerialBT;
+
 String json, deviceToken;
 String digitsOnlyToken = ""; // Create a new string for the digits
 
 // interval sec.
-unsigned long previousMillis = 0;
-unsigned long periodOTA = 0;
+unsigned long previousMillis, periodOTA, periodGPS;
 uint32_t lastReconnectAttempt = 0;
 
 //loop count
@@ -78,7 +82,7 @@ boolean GSMgprs = false;
 bool connectWifi = false;
 
 //AIS Magellan
-// bool resultSub = false;
+bool resultSub = false;
 
 // Your GPRS credentials
 const char apn[] = "internet";
@@ -90,139 +94,65 @@ const char version_url[] = "/Vichayasan/MySDM120/main/bin_version.txt";//"/Vicha
 const char* version_url_WiFiOTA = "https://raw.githubusercontent.com/Vichayasan/MySDM120/main/bin_version.txt";//"https://raw.githubusercontent.com/Vichayasan/BMA/refs/heads/main/TX/bin_version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
 
 String firmware_url;
-String current_version = "0.0.4";
+String current_version = "0.0.12";
 
 //For PubSub
-const char *magellanServer = "magellan.ais.co.th"; //"device-entmagellan.ais.co.th"
-String user_mqtt = "Vichayasan";
+const char *magellanServer = "device-entmagellan.ais.co.th"; //"device-entmagellan.ais.co.th"
+String user_mqtt = "";
 String key = "1000000"; //3C61056B4894
 String secret = "200";
 String mqttStatus = "";
-bool pubReqStatus;
-bool subRespStatus;
-String token = "";
+bool pubReqStatus, subRespStatus;
+String token, hostUI;
+float lat, lon;
+String topicRes, topicReq; 
 
 void t1CallgetMeter();
 void t2CallsendViaNBIOT();
 void t3CallHeartbeat();
 void HeartBeat();
 void readMeter();
+void writeEEPROM();
  
 struct Meter
-{
-
-  String vAB;
-  String vBC;
-  String vCA;
-  String vAN;
-  String vBN;
-  String vCN;
-
- 
+{ 
   String freq;
-
- 
-  String vuAN;
-  String vuBN;
-  String vuCN;
-  String vuLNW; // Voltage Unbalance L-N Worst
-
-
-  ////////////////////////
-
-  String Temp1;
-  String Temp2;
-  String Temp3;
-  String Temp4;
 
   String sdmVolt;
   String sdmCurrent;
   String sdmPF; //Power factor
+  String sdmWatt;
+  String sdmTotalActiveEnergy;
 
   int16_t gsmRSSI;
 
 };
 Meter meter;
 
-
-
-void writeString(char add, String data)
+struct UI
 {
-  int _size = data.length();
-  int i;
-  for (i = 0; i < _size; i++)
-  {
-    EEPROM.write(add + i, data[i]);
-  }
-  EEPROM.write(add + _size, '\0'); //Add termination null character for String Data
-  EEPROM.commit();
-}
+  uint16_t nameLabel, idLabel, firmwarelabel, deviceTK; //home tab
+  uint16_t userMqtt, keyDetail, secretDetail; //setting tab
+  uint16_t ICCD, GSM, GPRS; //debug tab
+  uint16_t resWiFi;
+  String passCode;
+};
+UI ui;
 
+struct tcp_pcb;
+extern struct tcp_pcb* tcp_tw_pcbs;
+extern "C" void tcp_abort(struct tcp_pcb* pcb);
 
-String read_String(char add)
-{
-  int i;
-  char data[100]; //Max 100 Bytes
-  int len = 0;
-  unsigned char k;
-  k = EEPROM.read(add);
-  while (k != '\0' && len < 500) //Read until null character
-  {
-    k = EEPROM.read(add + len);
-    data[len] = k;
-    len++;
-  }
-  data[len] = '\0';
-
-  return String(data);
-}
-  
-
-void _writeEEPROM(String data) {
-  Serial.print("Writing Data:");
-  Serial.println(data);
-
-  writeString(10, data);  //Address 10 and String type data
-  delay(10);
-}
-
-
-void t1CallgetMeter() {     // Update read all data
-  HeartBeat();
-  readMeter();
-
-}
-
-void t3CallHeartbeat() {
-  HeartBeat();
-}
-//void t4Restart() {     // Update read all data
-//  Serial.println("Restart");
-//  ESP.restart();
-//}
-
- 
-
-
-char  char_to_byte(char c)
-{
-  if ((c >= '0') && (c <= '9'))
-  {
-    return (c - 0x30);
-  }
-  if ((c >= 'A') && (c <= 'F'))
-  {
-    return (c - 55);
-  }
+void tcpCleanup(void) {
+  Serial.println("Debug TCPclean()");
+    while (tcp_tw_pcbs) {
+        tcp_abort(tcp_tw_pcbs);
+    }
 }
  
 
 float HexTofloat(uint32_t x) {
   return (*(float*)&x);
-}
-
-uint32_t FloatTohex(float x) {
-  return (*(uint32_t*)&x);
 }
 //------------------------------------------------
 
@@ -258,8 +188,10 @@ void readMeter() {     // Update read all data
 
     meter.sdmVolt = Read_Meter_float(ID_SDM, Reg_addr[0]);//แสกนหลายตัวตามค่า ID_METER_ALL=X
     meter.sdmCurrent = Read_Meter_float(ID_SDM, Reg_addr[1]);//แสกนหลายตัวตามค่า ID_METER_ALL=X
+    meter.sdmWatt = Read_Meter_float(ID_SDM, Reg_addr[2]);
     meter.sdmPF = Read_Meter_float(ID_SDM, Reg_addr[3]);
     meter.freq = Read_Meter_float(ID_SDM, Reg_addr[4]);
+    meter.sdmTotalActiveEnergy = Read_Meter_float(ID_SDM, Reg_addr[5]);
 
     // Serial.println("sdmVolt: " + meter.sdmVolt);
     // Serial.println("sdmCurrent: " + meter.sdmCurrent);
@@ -277,7 +209,7 @@ void configModeCallback(WiFiManager *myWiFiManager)
 
 void _initWiFi(){
   // WiFi.mode(WIFI_AP_STA); // Correct
-  String host = "AIS-Thor-" + deviceToken;
+  String host = "Thor-wifiManag-" + deviceToken;
   wifiManager.setAPCallback(configModeCallback);
   wifiManager.setConfigPortalTimeout(60); // auto close configportal after n seconds
   wifiManager.setAPClientCheck(true);     // avoid timeout if client connected to softap
@@ -293,9 +225,14 @@ void getMac()
 {
   byte mac[6];
   WiFi.macAddress(mac);
+  Serial.print("Get Mac");
   Serial.println("OK");
   Serial.print("+deviceToken: ");
   Serial.println(WiFi.macAddress());
+  // SerialBT.print("Get Mac");
+  // SerialBT.println("OK");
+  // SerialBT.print("+deviceToken: ");
+  // SerialBT.println(WiFi.macAddress());
   for (int i = 0; i < 6; i++) {
     if (mac[i] < 0x10) {
       deviceToken += "0"; // Add leading zero if needed
@@ -314,89 +251,6 @@ void getMac()
     }
   }
 
-}
-
-void _initMagel(){
-  Serial.println();
-  Serial.println("debug magel 01");
-  // setting.ThingIdentifier = "585099001736342820167992";
-  // setting.ThingSecret = "58509900173634282016";
-  // setting.endpoint = "magellan.ais.co.th"; //if not set *default: magellan.ais.co.th
-  // setting.clientBufferSize = defaultBuffer;
-  // // setting.clientBufferSize = defaultOTABuffer;
-
-  HeartBeat();
-
-  if (connectWifi){
-    //  magelWiFi.begin(setting);
-
-    //  magelWiFi.getServerConfig("autoUpdate", [](String resp){
-    //   magelWiFi.OTA.autoUpdate(false);
-    // //magel.OTA.getAutoUpdate() is return TRUE if set autoUpdate, FALSE if set manualUpdate
-    //   magelWiFi.clientConfig.add("autoUpdateMode", ((magelWiFi.OTA.getAutoUpdate())? "ENABLE" : "DISABLE"));
-    //   magelWiFi.clientConfig.save(); // update client config from device to thing optional
-    //   });
-
-     Serial.println();
-     Serial.println("debug magel 02");
-    //  magelWiFi.getControlJSON([](String controls){ 
-    //   Serial.print("# Control incoming JSON: ");
-    //   Serial.println(controls);
-    //   String control = magelWiFi.deserializeControl(controls);
-    //   magelWiFi.control.ACK(control); //ACKNOWLEDGE control to magellan ⚠️ important to Acknowledge control value to platform
-    // });
-    // Serial.println("Thing Token: " + magelWiFi.info.getThingToken());
-
-  }else{
-
-    // boolean status = GSMmqtt.connect(user_mqtt.c_str(), key.c_str(), secret.c_str());
-    // if (status == false){
-    //   Serial.println("magel: fail");
-    //   }
-    // magelGSM.setServer("magellan.ais.co.th", 1883);
-    
-    // magelGSM.begin(setting);
-
-    // magelGSM.getServerConfig("autoUpdate", [](String resp){
-    //   magelGSM.OTA.autoUpdate(false);
-    // //magel.OTA.getAutoUpdate() is return TRUE if set autoUpdate, FALSE if set manualUpdate
-    //   magelGSM.clientConfig.add("autoUpdateMode", ((magelGSM.OTA.getAutoUpdate())? "ENABLE" : "DISABLE"));
-    //   magelGSM.clientConfig.save(); // update client config from device to thing optional
-    //   });
-
-    // magelGSM.getControlJSON([](String controls){ 
-    //   Serial.print("# Control incoming JSON: ");
-    //   Serial.println(controls);
-    //   String control = magelGSM.deserializeControl(controls);
-    //   magelGSM.control.ACK(control); //ACKNOWLEDGE control to magellan ⚠️ important to Acknowledge control value to platform
-      
-    // });
-    // Serial.println("Thing Token: " + magelGSM.info.getThingToken());
-    }
-
-  // setting.clientBufferSize = defaultOTAbuffer; // if not set *default: 1024
-  HeartBeat();
-  Serial.println();
-  Serial.println("debug magel 03");
-  
-  // Serial.println("# Read Credential 1st time");
-  // Serial.println("ThingIdentifier: "+ magel.credential.getThingIdentifier());
-  // Serial.println("ThingSecret: "+ magel.credential.getThingSecret());
-  // Serial.println("# Regenerate Credential");
-  // magel.credential.regenerate(REGEN_BY_CONDITION); // if set true == will regenerate only credential activated, false regenerate without condition
-  // Serial.println("# Read Credential 2nd time (After Regenerate)");
-  // Serial.println("ThingIdentifier: "+ magel.credential.getThingIdentifier());
-  // Serial.println("ThingSecret: "+ magel.credential.getThingSecret());
-  // Serial.println("PreviousThingIdentifier: "+ magel.credential.getPreviousThingIdentifier());
-  // Serial.println("PreviousThingSecret: "+ magel.credential.getPreviousThingSecret());
-  // Serial.println("# Recovery Credential(swarp credential old to current)");
-  // magel.credential.recovery();
-  // Serial.println("ThingIdentifier: "+ magel.credential.getThingIdentifier());
-  // Serial.println("ThingSecret: "+ magel.credential.getThingSecret());
-  // Serial.println("PreviousThingIdentifier: "+ magel.credential.getPreviousThingIdentifier());
-  // Serial.println("PreviousThingSecret: "+ magel.credential.getPreviousThingSecret());
-
-  Serial.println();
 }
 
 bool checkForUpdate(String &firmware_url)
@@ -424,6 +278,7 @@ bool checkForUpdate(String &firmware_url)
 
   Serial.println("Current version: " + current_version);
   Serial.println("Available version: " + new_version);
+
   GSMclient.stop();
 
   if (new_version != current_version)
@@ -496,7 +351,7 @@ void performOTA(const char *firmware_url)
           totalBytesWritten += written; // Track total bytes written
 
           Serial.printf("Write %.02f%% (%ld/%ld)\n", (float)totalBytesWritten / (float)contentlength_real * 100.0, totalBytesWritten, contentlength_real);
-
+          
           String OtaStat = "OTA Updating: " + String((float)totalBytesWritten / (float)contentlength_real * 100.0) + " % ";
           
 
@@ -516,6 +371,7 @@ void performOTA(const char *firmware_url)
       else
       {
         Serial.println("Written only : " + String(written) + "/" + String(contentlength_real) + ". Retry?");
+
       }
 
       if (Update.end())
@@ -710,7 +566,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
   Serial.println("Token: " + token);
 }
 
-void requestThingToken(String topic){
+bool requestThingToken(String topic){
   String json;
   Serial.println("request Topic: " + topic);
 
@@ -721,14 +577,15 @@ void requestThingToken(String topic){
   if (connectWifi){
     pubReqStatus = mqttWiFi.publish(topic.c_str(), char_array);
     Serial.print("requestThingToken: ");
-    Serial.println(pubReqStatus);
-    // Serial.println(pubReqStatus?"Succeed":"Fail");
+    // Serial.println(pubReqStatus);
+    Serial.println(pubReqStatus?"Succeed":"Fail");
   }else{
     pubReqStatus = mqttGSM.publish(topic.c_str(), char_array);
     Serial.print("requestThingToken: ");
-    Serial.println(pubReqStatus);
-    // Serial.println(pubReqStatus?"Succeed":"Fail");
+    // Serial.println(pubReqStatus);
+    Serial.println(pubReqStatus?"Succeed":"Fail");
   }
+  return pubReqStatus;
 }
 
 boolean reconnectWiFiMqtt()
@@ -749,17 +606,18 @@ boolean reconnectWiFiMqtt()
   Serial.println(" success");
   mqttStatus = "Succeed to Connect Server with WiFi!";
   Serial.println(F("Connect MQTT Success."));
-  Serial.println("user: " + user_mqtt);
-  Serial.println("Key: " + key);
-  Serial.println("Secret: " + secret);
-  String topicReq = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/req";
-  String topicRes = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/resp";
-  
+
   Serial.println("topic Response: " + topicRes);
+  delay(3000);
   subRespStatus = mqttWiFi.subscribe(topicRes.c_str());
+  delay(3000);
   Serial.print("Token Response:");
-  Serial.println(subRespStatus);
+  // Serial.println(subRespStatus);
+  Serial.println(subRespStatus?"Succeed":"Fail");
+  
+  delay(3000);
   requestThingToken(topicReq);
+  
   // mqttWiFi.subscribe(("api/v2/thing/" + token + "/delta/resp").c_str());
   return mqttWiFi.connected();
 }
@@ -778,20 +636,179 @@ boolean reconnectGSMMqtt()
   }
   Serial.println(" success");
   Serial.println(F("Connect MQTT Success."));
-  Serial.println("user: " + user_mqtt);
-  Serial.println("Key: " + key);
-  Serial.println("Secret: " + secret);
-  String topicReq = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/req";
-  String topicRes = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/resp";
-  
+
   Serial.println("topic Response: " + topicRes);
+  delay(3000);
   subRespStatus = mqttGSM.subscribe(topicRes.c_str());
+  delay(3000);
   Serial.print("Token Response:");
-  Serial.println(subRespStatus);
+  // Serial.println(subRespStatus);
+  Serial.println(subRespStatus?"Succeed":"Fail");
+
+  delay(3000);
   requestThingToken(topicReq);
-  String AAA = "thing";
+  delay(3000);
+  
+  // String AAA = "thing";
   // mqttWiFi.subscribe(("api/v2/thing/"+ key + "/" + secret + "/auth/resp").c_str());
   return mqttGSM.connected();
+}
+
+void enterRSTCallback(Control *sender, int type){
+  Serial.println("debug 2");
+  Serial.println(sender->value);
+  // ESPUI.updateControl(sender);
+  Control* _rst = ESPUI.getControl(ui.resWiFi);
+  ui.passCode = _rst->value.c_str();
+
+  if (type == B_UP) { // Only trigger on button release
+    if (ui.passCode.equals("systemctl restart networking")) {  
+      Serial.println("Restarting WiFi...");
+      
+      // Reset WiFi credentials
+      wifiManager.resetSettings();  
+      
+      // Restart ESP
+      ESP.restart();  
+    } else {
+      Serial.println("Invalid command received.");
+    }
+  }
+}
+
+void enterDetailsCallback(Control *sender, int type)
+{
+  Serial.println("enterDetailsCallback Debug 1");
+  Serial.println(sender->value);
+  ESPUI.updateControl(sender);
+
+  if (type == B_UP)
+  {
+    user_mqtt = ESPUI.getControl(ui.userMqtt)->value.c_str();
+    writeEEPROM();
+  }
+}
+
+void _initUI(){
+  Serial.println("Starting _initUI...");
+
+  hostUI = "Thor-UI-" + deviceToken;
+
+  // if (WiFi.status() == WL_CONNECTED) {
+  //     Serial.println("WiFi is connected!");
+  //     Serial.print("IP Address: ");
+  //     Serial.println(WiFi.localIP());
+
+  //     if (!MDNS.begin(hostUI.c_str())) {
+  //         Serial.println("Error setting up MDNS responder!");
+  //     } else {
+  //         Serial.println("MDNS responder started successfully!");
+  //     }
+  // } else {
+      Serial.println("\nCreating Access Point...");
+      Serial.print("WiFi Mode: ");
+      Serial.println(WiFi.getMode()); // Should be 2 (WIFI_AP) when running this
+      
+      if(connectWifi){
+        WiFi.mode(WIFI_AP_STA); // Should be in STA mode
+      }else{
+        WiFi.mode(WIFI_STA);
+      }
+      
+      WiFi.softAPConfig(IPAddress(192, 168, 1, 1), IPAddress(192, 168, 1, 1), IPAddress(255, 255, 255, 0));
+
+      if (WiFi.softAP(hostUI.c_str(), "green7650")) {
+          Serial.println("Access Point started successfully!");
+      } else {
+          Serial.println("Failed to start Access Point!");
+      }
+
+      Serial.print("AP SSID: ");
+      Serial.println(hostUI);
+      Serial.print("AP IP Address: ");
+      Serial.println(WiFi.softAPIP());
+  // }
+
+  Serial.println("Finished _initUI...");
+}
+
+void setUpUI()
+{
+  Serial.println("setUpUI Debug 1");
+
+  // tcpCleanup();
+
+  // Turn off verbose  ging
+  ESPUI.setVerbosity(Verbosity::Quiet);
+
+  // Make sliders continually report their position as they are being dragged.
+  ESPUI.sliderContinuous = true;
+
+  // This GUI is going to be a tabbed GUI, so we are adding most controls using ESPUI.addControl
+  // which allows us to set a parent control. If we didn't need tabs we could use the simpler add
+  // functions like:
+  //     ESPUI.button()
+  //     ESPUI.label()
+
+  /*
+     Tab: Basic Controls
+     This tab contains all the basic ESPUI controls, and shows how to read and update them at runtime.
+    -----------------------------------------------------------------------------------------------------------*/
+  auto maintab = ESPUI.addControl(Tab, "", "Home");
+  ui.nameLabel = ESPUI.addControl(Label, "Device Name", "THOR", Emerald, maintab);
+  ui.idLabel = ESPUI.addControl(Label, "Device ID", String(deviceToken), Emerald, maintab);
+  ui.firmwarelabel = ESPUI.addControl(Label, "Firmware", String(current_version), Emerald, maintab);
+
+  auto set = ESPUI.addControl(Tab, "", "Setting");
+  ui.userMqtt = ESPUI.addControl(Text, "MQTT User", String(user_mqtt), Emerald, set, enterDetailsCallback);
+  ESPUI.addControl(Button, "DONE", "DONE", Peterriver, set, enterDetailsCallback);
+  ui.keyDetail = ESPUI.addControl(Label, "Thing Key", String(key), Emerald, set);
+  ui.secretDetail = ESPUI.addControl(Label, "Thing Secret", String(secret), Emerald, set);
+  
+
+  auto debug = ESPUI.addControl(Tab, "", "Debug");
+  ui.ICCD = ESPUI.addControl(Label, "NCCID", String(modem.getSimCCID()), Emerald, debug);
+
+  auto connect = ESPUI.addControl(Tab, "", "Connection");
+  ui.resWiFi = ESPUI.addControl(Text, "Restart WiFi", String(ui.passCode), Alizarin, connect, enterRSTCallback);
+  ESPUI.addControl(Button, "RESTART", "RST", Peterriver, connect, enterRSTCallback);
+  
+
+  // Finally, start up the UI.
+  // This should only be called once we are connected to WiFi.
+  ESPUI.begin(hostUI.c_str());
+}
+
+void writeEEPROM(){
+
+  char data1[40];
+
+  user_mqtt.toCharArray(data1, 40);
+
+  int addr = 0;
+  for (int len = 0; len < user_mqtt.length(); len++)
+    {
+      EEPROM.write(addr + len, data1[len]); // Write each character
+    }
+    EEPROM.write(addr + user_mqtt.length(), '\0'); // Add null terminator at the end
+  addr += sizeof(user_mqtt) + 1;
+
+  EEPROM.commit();
+}
+
+void readEEPROM()
+{
+  int addr = 0;
+
+  for (int len = 0; len < 40; len++)
+  {
+    char data1 = EEPROM.read(addr + len);
+    if (data1 == '\0' || data1 == (char)255 || data1 == (char)20)
+      break;
+    user_mqtt += data1;
+  }
+
+  ESPUI.updateText(ui.userMqtt, String(user_mqtt));
 }
 
 //**************************************************************************************************************
@@ -807,15 +824,25 @@ void setup() {
   digitalWrite(GSM_RESET, HIGH);
 
   Serial.begin(115200);
+  
+
+  EEPROM.begin(512); // Ensure enough size for data
+
+  readEEPROM();
 
   getMac();
   secure_layer.setInsecure();
+  // String hostBT = "Thor-Serial-" + deviceToken;
+  // SerialBT.begin(hostBT.c_str());
 
   SerialAT.begin(UART_BAUD, SERIAL_8N1, MODEM_RX, MODEM_TX);
-  modem.sendAT("+QCFG=\"roamservice\",2");
-  modem.testAT();
+  // modem.sendAT("+QCFG=\"roamservice\",2");
+  // modem.sendAT("+SGPIO=0,4,1,1");
+  // modem.sendAT("+QGPS=1");
+  // modem.testAT();
 
   Serial.println();
+  // SerialBT.println();
   // Serial.println("debug 01");
 
   modem.init();
@@ -826,19 +853,24 @@ void setup() {
   String modemInfo = modem.getModemInfo();
   Serial.print("Modem: ");
   Serial.println(modemInfo);
+  // SerialBT.print("Modem: ");
+  // SerialBT.println(modemInfo);
 
-  Serial.println();
-  Serial.println("debug 02");
-  Serial.println();
+  // Serial.println();
+  // Serial.println("debug 02");
+  // Serial.println();
   // HeartBeat();
 
   // delay(30000);
 
   Serial.print("Waiting for network...");
+  // SerialBT.print("Waiting for network...");
+
   if (!modem.waitForNetwork())
   {
     GSMnetwork = false;
     Serial.println(" fail");
+    // SerialBT.println(" fail");
     delay(10000);
     ESP.restart();
     
@@ -857,6 +889,9 @@ void setup() {
     Serial.println(modem.getSimStatus());
     Serial.print("RegistrationStatus: ");
     Serial.println(modem.getRegistrationStatus());
+    // modem.getGPS(&lat, &lon);
+    // Serial.printf("Lat: %f \n", lat);
+    // Serial.printf("lon: %f \n", lon);
     Serial.println();
 
   }
@@ -872,10 +907,13 @@ void setup() {
     
     Serial.print("Connecting to ");
     Serial.print(apn);
+    // SerialBT.print("Connecting to ");
+    // SerialBT.print(apn);
     if (!modem.gprsConnect(apn, user, pass))
     {
       GSMgprs = false;
       Serial.println(" fail");
+      // SerialBT.println(" fail");
       delay(10000);
     }
     else
@@ -897,6 +935,7 @@ void setup() {
   }
 
   Serial.println();
+
   delay(2000);
 
   // user_mqtt.concat(digitsOnlyToken.c_str());
@@ -906,28 +945,62 @@ void setup() {
   Serial.println("user: " + user_mqtt);
   Serial.println("Key: " + key);
   Serial.println("Secret: " + secret);
-
-  if (connectWifi){
-    // wifiManager.resetSettings();
-    _initWiFi();
-    Serial.printf("Wi-Fi RSSI: %d \n", WiFi.RSSI() );
-    mqttWiFi.setServer(magellanServer, 1883);
-    mqttWiFi.setCallback(callback);
-    reconnectWiFiMqtt();
-
-    WiFi_OTA();
-
-  }else{
-    mqttGSM.setServer(magellanServer, 1883);
-    mqttGSM.setCallback(callback);
-    reconnectGSMMqtt();
-
-    GSM_OTA();
-  }
+  topicReq = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/req";
+  topicRes = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/resp";
 
   
+    if (connectWifi){
+      // wifiManager.resetSettings();
+      _initWiFi();
+      Serial.printf("Wi-Fi RSSI: %d \n", WiFi.RSSI() );
+      mqttWiFi.setServer(magellanServer, 1883);
+      mqttWiFi.setCallback(callback);
+      mqttWiFi.setBufferSize(512); // Example: setting buffer to 512 bytes
 
-  modbus.begin(2400, SERIAL_8N1, 16, 17);
+      // You can also add a check to see if the buffer was allocated successfully
+      if (!mqttWiFi.setBufferSize(512)) {
+        Serial.println("Failed to allocate MQTT buffer");
+      }
+
+      if (user_mqtt != ""){
+        reconnectWiFiMqtt();
+        
+      }
+      delay(3000);
+
+      WiFi_OTA();
+
+    }else{
+      mqttGSM.setServer(magellanServer, 1883);
+      mqttGSM.setCallback(callback);
+      mqttGSM.setBufferSize(512); // Example: setting buffer to 512 bytes
+
+      // You can also add a check to see if the buffer was allocated successfully
+      if (!mqttGSM.setBufferSize(512)) {
+        Serial.println("Failed to allocate MQTT buffer");
+        // SerialBT.println("Failed to allocate MQTT buffer");
+
+      }
+
+      if (user_mqtt != ""){
+        reconnectGSMMqtt();
+      }
+      delay(3000);
+
+      GSM_OTA();
+    }
+  
+
+  _initUI();
+  delayMicroseconds(2000000);
+  setUpUI();
+  
+  ESPUI.updateLabel(ui.ICCD, String(modem.getSimCCID()));
+  ESPUI.updateText(ui.userMqtt, String(user_mqtt));
+  ESPUI.updateLabel(ui.keyDetail, String(key));
+  ESPUI.updateLabel(ui.secretDetail, String(secret));
+
+  modbus.begin(9600, SERIAL_8N1, 16, 17);
   // communicate with Modbus slave ID 1 over Serial (port 2)
   node.begin(1, modbus);
 
@@ -936,22 +1009,23 @@ void setup() {
   Serial.println();
   Serial.println(F("***********************************"));
 
+
   // HeartBeat();
-//  runner.init();
+  //  runner.init();
 
-//  runner.addTask(t1);
-//  Serial.println("added t1");
-//  runner.addTask(t2);
-//  Serial.println("added t2");
-//  runner.addTask(t3);
-//  Serial.println("added t3");
-  //  runner.addTask(t4);
-  //  Serial.println("added t4");
+  //  runner.addTask(t1);
+  //  Serial.println("added t1");
+  //  runner.addTask(t2);
+  //  Serial.println("added t2");
+  //  runner.addTask(t3);
+  //  Serial.println("added t3");
+    //  runner.addTask(t4);
+    //  Serial.println("added t4");
 
-//  t1.enable();  Serial.println("Enabled t1");
-//  t2.enable();  Serial.println("Enabled t2");
-//  t3.enable();  Serial.println("Enabled t3");
-  //  t4.enable();  Serial.println("Enabled t4");
+  //  t1.enable();  Serial.println("Enabled t1");
+  //  t2.enable();  Serial.println("Enabled t2");
+  //  t3.enable();  Serial.println("Enabled t3");
+    //  t4.enable();  Serial.println("Enabled t4");
 
 }
 
@@ -959,163 +1033,204 @@ void loop() {
   unsigned long currentMillis = millis();
   //float x = Read_Meter_float(ID_meter,Reg_Volt);
   //runner.execute();
-  if(connectWifi){
 
-    // magelWiFi.loop();
-    // if(!magelWiFi.isConnected()){
-    //     magelWiFi.reconnect();
-    //   }
-    // magelWiFi.interval(10, [](){
-    // });
+  if(user_mqtt != ""){
 
-    if (!mqttWiFi.connected())
-    {
-      Serial.println("=== WiFi MQTT NOT CONNECTED ===");
-      // Reconnect every 10 seconds
-      uint32_t t = millis() / 1000;
-      if (t - lastReconnectAttempt >= 30)
+    
+
+      if(connectWifi){
+
+      // magelWiFi.loop();
+      // if(!magelWiFi.isConnected()){
+      //     magelWiFi.reconnect();
+      //   }
+      // magelWiFi.interval(10, [](){
+      // });
+
+      if (!mqttWiFi.connected())
       {
-        lastReconnectAttempt = t;
-        if (CountPing >= pingCount)
+        Serial.println("=== WiFi MQTT NOT CONNECTED ===");
+        // Reconnect every 10 seconds
+        uint32_t t = millis() / 1000;
+        if (t - lastReconnectAttempt >= 30)
         {
-          CountPing = 0;
-          ESP.restart();
+          lastReconnectAttempt = t;
+          if (CountPing >= pingCount)
+          {
+            CountPing = 0;
+            ESP.restart();
+          }
+          CountPing++;
+
+          if (reconnectWiFiMqtt())
+          {
+            CountPing = 0;
+            lastReconnectAttempt = 0;
+          }
         }
-        CountPing++;
-
-        if (reconnectWiFiMqtt())
-        {
-          CountPing = 0;
-          lastReconnectAttempt = 0;
-        }
-      }
-      delay(100);
-      return;
-    }
-    mqttWiFi.loop();
-
-
-  }else{
-
-    // magelGSM.loop();
-    // if(!magelGSM.isConnected()){
-    //     magelGSM.reconnect();
-    //   }
-
-    if (!modem.isNetworkConnected())
-    {
-      SerialMon.println("Network disconnected");
-      if (!modem.waitForNetwork(180000L, true))
-      {
-        SerialMon.println(" fail");
-        delay(10000);
+        delay(100);
         return;
       }
-      if (modem.isNetworkConnected())
+      mqttWiFi.loop();
+
+
+    }else{
+
+      // magelGSM.loop();
+      // if(!magelGSM.isConnected()){
+      //     magelGSM.reconnect();
+      //   }
+
+      if (!modem.isNetworkConnected())
       {
-        SerialMon.println("Network re-connected");
-      }
-      // and make sure GPRS/EPS is still connected
-      if (!modem.isGprsConnected())
-      {
-        SerialMon.println("GPRS disconnected!");
-        SerialMon.print(F("Connecting to "));
-        SerialMon.print(apn);
-        if (!modem.gprsConnect(apn, user, pass))
+        SerialMon.println("Network disconnected");
+        if (!modem.waitForNetwork(180000L, true))
         {
           SerialMon.println(" fail");
           delay(10000);
           return;
         }
-        if (modem.isGprsConnected())
+        if (modem.isNetworkConnected())
         {
-          SerialMon.println("GPRS reconnected");
+          SerialMon.println("Network re-connected");
+        }
+        // and make sure GPRS/EPS is still connected
+        if (!modem.isGprsConnected())
+        {
+          SerialMon.println("GPRS disconnected!");
+          SerialMon.print(F("Connecting to "));
+          SerialMon.print(apn);
+          if (!modem.gprsConnect(apn, user, pass))
+          {
+            SerialMon.println(" fail");
+            delay(10000);
+            return;
+          }
+          if (modem.isGprsConnected())
+          {
+            SerialMon.println("GPRS reconnected");
+          }
         }
       }
-    }
 
-    if (!mqttGSM.connected())
-    {
-      SerialMon.println("=== GSM MQTT NOT CONNECTED ===");
-      // Reconnect every 10 seconds
-      uint32_t t = millis() / 1000;
-      if (t - lastReconnectAttempt >= 30)
+      if (!mqttGSM.connected())
       {
-        lastReconnectAttempt = t;
-
-        if (CountPing >= pingCount)
+        SerialMon.println("=== GSM MQTT NOT CONNECTED ===");
+        // Reconnect every 10 seconds
+        uint32_t t = millis() / 1000;
+        if (t - lastReconnectAttempt >= 30)
         {
-          CountPing = 0;
-          ESP.restart();
-        }
-        CountPing++;
+          lastReconnectAttempt = t;
 
-        if (reconnectGSMMqtt())
-        {
-          CountPing = 0;
-          lastReconnectAttempt = 0;
+          if (CountPing >= pingCount)
+          {
+            CountPing = 0;
+            ESP.restart();
+          }
+          CountPing++;
+
+          if (reconnectGSMMqtt())
+          {
+            CountPing = 0;
+            lastReconnectAttempt = 0;
+          }
         }
+        delay(100);
+        return;
       }
-      delay(100);
-      return;
+
+      mqttGSM.loop();
+
     }
+  }
 
-    mqttGSM.loop();
+  if (currentMillis - periodGPS >= 600000){
+    periodGPS = currentMillis;
 
+    Serial.println();
+   
+    if(modem.enableGPS()){
+      Serial.println("Success to enable gps");
+    }else{
+      Serial.println("Fail to enable gps");
+    }
+        Serial.println();
+
+      // float gps_latitude  = 0;
+      // float gps_longitude = 0;
+
+        Serial.println("Requesting current GPS/GNSS/GLONASS location");
+        if (modem.getGPS(&lat, &lon)) {
+          Serial.printf("Latitude: %s \tLongitude: %s \n", String(lat, 8), String(lon, 8));
+        } else {
+          Serial.println("Couldn't get GPS/GNSS/GLONASS location, retrying in 15s.");
+        }
+          Serial.println();
+      Serial.println("Retrieving GPS/GNSS/GLONASS location again as a string");
+      String gps_raw = modem.getGPSraw();
+      Serial.println("GPS/GNSS Based Location String: " + gps_raw);
+      Serial.println("Disabling GPS");
+
+      modem.disableGPS();
   }
 
 
-
-  if (currentMillis - previousMillis >= 30000){
+  if (currentMillis - previousMillis >= 300000){
     previousMillis = currentMillis;
 
-    Serial.println("debug loop sender 01");
-    Serial.print("Used space: ");
-    Serial.print(SPIFFS.usedBytes());
-    Serial.println(" Bytes");
+    // Serial.println("debug loop sender 01");
+
     readMeter() ;
-    Serial.print("Used space: ");
-    Serial.print(SPIFFS.usedBytes());
-    Serial.println(" Bytes");
  
-  //  GET_METER();
+    //  GET_METER();
     Serial.println();
+
   
     String json = "";
-    json.concat("{\"Tn\":\"");
+    json.concat("{\"DevicToken\":\"");
     json.concat(deviceToken);
-
+    json.concat("\",\"ccid\":\"");
+    json.concat(modem.getSimCCID());
+    json.concat("\",\"version\":\"");
+    json.concat(current_version);
     if (connectWifi){
       json.concat("\",\"Network\":\"");
       json.concat("Wi-Fi");
       json.concat("\",\"WiFi_RSSI\":");
       json.concat(WiFi.RSSI());
-      json.concat(",\"version\":\"");
-      json.concat(current_version);
     }else{
       json.concat("\",\"Network\":\"");
       json.concat("GSM");
       json.concat("\",\"GSM_RSSI\":");
       json.concat(modem.getSignalQuality());
-      json.concat(",\"version\":\"");
-      json.concat(current_version);
     }
-    json.concat("\",\"vol\":");
+    json.concat(",\"Lat\":");
+    json.concat(String(lat, 8));
+    json.concat(",\"Lon\":");
+    json.concat(String(lon, 8));
+    json.concat(",\"vol\":");
     json.concat(meter.sdmVolt);
     json.concat(",\"cur\":");
     json.concat(meter.sdmCurrent);
-  //  json.concat(",\"ap\":");
-  //  json.concat(DATA_METER[2]);
-   json.concat(",\"pf\":");
-   json.concat(meter.sdmPF);
-   json.concat(",\"f\":");
-   json.concat(meter.freq);
-  //  json.concat(",\"TAE\":");
-  //  json.concat(DATA_METER[5]);
+    json.concat(",\"watt\":");
+    json.concat(meter.sdmWatt);
+    json.concat(",\"pf\":");
+    json.concat(meter.sdmPF);
+    json.concat(",\"f\":");
+    json.concat(meter.freq);
+    json.concat(",\"totalactivepower\":");
+    json.concat(meter.sdmTotalActiveEnergy);
     json.concat("}");
     Serial.println(json);
 
+
     int str_len = json.length() + 1;
+
+    Serial.println();
+    Serial.printf("str_len: %d \n", str_len);
+    Serial.println();
+
+
     char char_array[str_len];
     json.toCharArray(char_array, str_len);
     
@@ -1124,37 +1239,37 @@ void loop() {
     if (connectWifi)
     {
 
-      Serial.println("debug loop sender wifi 02");
+      // Serial.println("debug loop sender wifi 02");
       // resultSub = magelWiFi.report.send("{\"DeviceToken\":\"" + String(deviceToken) + "\",\"Network\":\"Wi-Fi\",\"WiFi_RSSI\":" + String(WiFi.RSSI()) + ",\"version\":\"" + String(current_version) + "\",\"volt\":" + String(meter.sdmVolt) + ",\"current\":" + String(meter.sdmCurrent) + ",\"PowerFactor\":" + String(meter.sdmPF) + ",\"frequency\":" + String(meter.freq) + "}"); //send data sensor with manual json format
       // Serial.print("[Status report]: ");
       // Serial.println((resultSub)? "Sending via Wi-Fi SUCCESS" : "Sending via Wi-Fi FAIL");
+      resultSub = mqttWiFi.publish(topic.c_str(), char_array, str_len);
+      Serial.print("[Status report]: ");
+      Serial.println((resultSub)? "Sending via Wi-Fi SUCCESS" : "Sending via Wi-Fi FAIL");
 
-      mqttWiFi.publish(topic.c_str(), char_array);
 
-      Serial.println("debug loop sender wifi 03");
+      // Serial.println("debug loop sender wifi 03");
 
     }else{
 
-      Serial.println("debug loop sender GSM 01");
+      // Serial.println("debug loop sender GSM 01");
       // resultSub = magelGSM.report.send("{\"DeviceToken\":\"" + String(deviceToken) + "\",\"Network\":\"GSM\",\"GSM_RSSI\":" + String(modem.getSignalQuality()) + ",\"version\":\"" + String(current_version) + "\",\"volt\":" + String(meter.sdmVolt) + ",\"current\":" + String(meter.sdmCurrent) + ",\"PowerFactor\":" + String(meter.sdmPF) + ",\"frequency\":" + String(meter.freq) + "}"); //send data sensor with manual json format
       // Serial.print("[Status report]: ");
       // Serial.println((resultSub)? "Sending via GSM SUCCESS" : "Sending via GSM FAIL");
       // Serial.println("debug loop sender GSM 03");
-      mqttGSM.publish(topic.c_str(), char_array);
+      resultSub = mqttGSM.publish(topic.c_str(), char_array, str_len);
+      Serial.print("[Status report]: ");
+      Serial.println((resultSub)? "Sending via GSM SUCCESS" : "Sending via GSM FAIL");
 
     }
 
-    Serial.print("Used space: ");
-    Serial.print(SPIFFS.usedBytes());
-    Serial.println(" Bytes");
-
   }
 
-  if (currentMillis - periodOTA >= 60000){
+  if (currentMillis - periodOTA >= 3600000){
     periodOTA = currentMillis;
-    Serial.print("Used space: ");
-    Serial.print(SPIFFS.usedBytes());
-    Serial.println(" Bytes");
+    // Serial.print("Used space: ");
+    // Serial.print(SPIFFS.usedBytes());
+    // Serial.println(" Bytes");
 
     if (connectWifi){
         WiFi_OTA();
