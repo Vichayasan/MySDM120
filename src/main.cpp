@@ -85,7 +85,8 @@ bool connectWifi = false;
 bool resultSub = false;
 
 // Your GPRS credentials
-const char apn[] = "internet";
+char apn[] = "";
+String apnStr = "";
 const char user[] = "";
 const char pass[] = "";
 
@@ -132,7 +133,7 @@ Meter meter;
 struct UI
 {
   uint16_t nameLabel, idLabel, firmwarelabel, deviceTK; //home tab
-  uint16_t userMqtt, keyDetail, secretDetail; //setting tab
+  uint16_t userMqtt, keyDetail, secretDetail, apnGSM; //setting tab
   uint16_t ICCD, GSM, GPRS; //debug tab
   uint16_t resWiFi;
   String passCode;
@@ -685,6 +686,7 @@ void enterDetailsCallback(Control *sender, int type)
   if (type == B_UP)
   {
     user_mqtt = ESPUI.getControl(ui.userMqtt)->value.c_str();
+    apnStr = ESPUI.getControl(ui.apnGSM)->value.c_str();
     writeEEPROM();
   }
 }
@@ -760,6 +762,7 @@ void setUpUI()
   ui.firmwarelabel = ESPUI.addControl(Label, "Firmware", String(current_version), Emerald, maintab);
 
   auto set = ESPUI.addControl(Tab, "", "Setting");
+  ui.apnGSM = ESPUI.addControl(Text, "APN", String(apnStr), Emerald, set, enterDetailsCallback);
   ui.userMqtt = ESPUI.addControl(Text, "MQTT User", String(user_mqtt), Emerald, set, enterDetailsCallback);
   ESPUI.addControl(Button, "DONE", "DONE", Peterriver, set, enterDetailsCallback);
   ui.keyDetail = ESPUI.addControl(Label, "Thing Key", String(key), Emerald, set);
@@ -782,8 +785,11 @@ void setUpUI()
 void writeEEPROM(){
 
   char data1[40];
+  char data2[40];
 
   user_mqtt.toCharArray(data1, 40);
+  apnStr.toCharArray(data2, 40);
+  connectWifi = false;
 
   int addr = 0;
   for (int len = 0; len < user_mqtt.length(); len++)
@@ -792,8 +798,15 @@ void writeEEPROM(){
     }
     EEPROM.write(addr + user_mqtt.length(), '\0'); // Add null terminator at the end
   addr += sizeof(user_mqtt) + 1;
+  for (int len = 0; len < apnStr.length(); len++)
+    {
+      EEPROM.write(addr + len, data2[len]); // Write each character
+    }
+    EEPROM.write(addr + apnStr.length(), '\0'); // Add null terminator at the end
+    addr += sizeof(apnStr) + 1;
 
   EEPROM.commit();
+  ESP.restart();
 }
 
 void readEEPROM()
@@ -807,8 +820,21 @@ void readEEPROM()
       break;
     user_mqtt += data1;
   }
+  addr += sizeof(user_mqtt) + 1;
+  for (int len = 0; len < 40; len++)
+  {
+    char data2 = EEPROM.read(addr + len);
+    if (data2 == '\0' || data2 == (char)255) //)
+      break;
+    apnStr += data2;
+    Serial.println("apnstr: " + apnStr);
+  }
+
+  Serial.println("apnstr: " + apnStr);
+  apnStr.toCharArray(apn, 20);
 
   ESPUI.updateText(ui.userMqtt, String(user_mqtt));
+  ESPUI.updateText(ui.apnGSM, String(apnStr));
 }
 
 //**************************************************************************************************************
@@ -846,6 +872,7 @@ void setup() {
   // Serial.println("debug 01");
 
   modem.init();
+  modem.enableGPS();
   // delay(30000);
 
   SerialMon.println("Initializing modem...");
@@ -898,98 +925,99 @@ void setup() {
   delay(2000);
   // delay(30000);
   // HeartBeat();
+    if (apnStr != ""){
 
-  if (GSMnetwork)
-  {
-    String showText = "Connecting to ";
-    showText += apn;
-    showText += " ...";
-    
-    Serial.print("Connecting to ");
-    Serial.print(apn);
-    // SerialBT.print("Connecting to ");
-    // SerialBT.print(apn);
-    if (!modem.gprsConnect(apn, user, pass))
-    {
-      GSMgprs = false;
-      Serial.println(" fail");
-      // SerialBT.println(" fail");
-      delay(10000);
-    }
-    else
-    {
-      GSMgprs = true;
-      Serial.println(" OK");
-    }
-    delay(3000);
-  }
-
-  if ((GSMnetwork == true) && (GSMgprs == true))
-  {
-    connectWifi = false;
-  }
-
-  if ((GSMnetwork == false) || (GSMgprs == false))
-  {
-    connectWifi = true;
-  }
-
-  Serial.println();
-
-  delay(2000);
-
-  // user_mqtt.concat(digitsOnlyToken.c_str());
-  key.concat(digitsOnlyToken.c_str());
-  secret.concat(digitsOnlyToken.c_str());
-  // printlnSerial("Token: " + token);
-  Serial.println("user: " + user_mqtt);
-  Serial.println("Key: " + key);
-  Serial.println("Secret: " + secret);
-  topicReq = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/req";
-  topicRes = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/resp";
-
-  
-    if (connectWifi){
-      // wifiManager.resetSettings();
-      _initWiFi();
-      Serial.printf("Wi-Fi RSSI: %d \n", WiFi.RSSI() );
-      mqttWiFi.setServer(magellanServer, 1883);
-      mqttWiFi.setCallback(callback);
-      mqttWiFi.setBufferSize(512); // Example: setting buffer to 512 bytes
-
-      // You can also add a check to see if the buffer was allocated successfully
-      if (!mqttWiFi.setBufferSize(512)) {
-        Serial.println("Failed to allocate MQTT buffer");
-      }
-
-      if (user_mqtt != ""){
-        reconnectWiFiMqtt();
+      if (GSMnetwork)
+      {
+        String showText = "Connecting to ";
+        showText += apn;
+        showText += " ...";
         
+        Serial.print("Connecting to ");
+        Serial.print(apn);
+        // SerialBT.print("Connecting to ");
+        // SerialBT.print(apn);
+        if (!modem.gprsConnect(apn, user, pass))
+        {
+          GSMgprs = false;
+          Serial.println(" fail");
+          // SerialBT.println(" fail");
+          delay(10000);
+        }
+        else
+        {
+          GSMgprs = true;
+          Serial.println(" OK");
+        }
+        delay(3000);
       }
-      delay(3000);
 
-      WiFi_OTA();
-
-    }else{
-      mqttGSM.setServer(magellanServer, 1883);
-      mqttGSM.setCallback(callback);
-      mqttGSM.setBufferSize(512); // Example: setting buffer to 512 bytes
-
-      // You can also add a check to see if the buffer was allocated successfully
-      if (!mqttGSM.setBufferSize(512)) {
-        Serial.println("Failed to allocate MQTT buffer");
-        // SerialBT.println("Failed to allocate MQTT buffer");
-
+      if ((GSMnetwork == true) && (GSMgprs == true))
+      {
+        connectWifi = false;
       }
 
-      if (user_mqtt != ""){
-        reconnectGSMMqtt();
+      if ((GSMnetwork == false) || (GSMgprs == false))
+      {
+        connectWifi = true;
       }
-      delay(3000);
 
-      GSM_OTA();
-    }
+      Serial.println();
+
+      delay(2000);
+
+      // user_mqtt.concat(digitsOnlyToken.c_str());
+      key.concat(digitsOnlyToken.c_str());
+      secret.concat(digitsOnlyToken.c_str());
+      // printlnSerial("Token: " + token);
+      Serial.println("user: " + user_mqtt);
+      Serial.println("Key: " + key);
+      Serial.println("Secret: " + secret);
+      topicReq = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/req";
+      topicRes = "api/v2/thing/" + String(key) + "/" + String(secret) + "/auth/resp";
+
   
+      if (connectWifi){
+        // wifiManager.resetSettings();
+        _initWiFi();
+        Serial.printf("Wi-Fi RSSI: %d \n", WiFi.RSSI() );
+        mqttWiFi.setServer(magellanServer, 1883);
+        mqttWiFi.setCallback(callback);
+        mqttWiFi.setBufferSize(512); // Example: setting buffer to 512 bytes
+
+        // You can also add a check to see if the buffer was allocated successfully
+        if (!mqttWiFi.setBufferSize(512)) {
+          Serial.println("Failed to allocate MQTT buffer");
+        }
+
+        if (user_mqtt != ""){
+          reconnectWiFiMqtt();
+          
+        }
+        delay(3000);
+
+        WiFi_OTA();
+
+      }else{
+        mqttGSM.setServer(magellanServer, 1883);
+        mqttGSM.setCallback(callback);
+        mqttGSM.setBufferSize(512); // Example: setting buffer to 512 bytes
+
+        // You can also add a check to see if the buffer was allocated successfully
+        if (!mqttGSM.setBufferSize(512)) {
+          Serial.println("Failed to allocate MQTT buffer");
+          // SerialBT.println("Failed to allocate MQTT buffer");
+
+        }
+
+        if (user_mqtt != ""){
+          reconnectGSMMqtt();
+        }
+        delay(3000);
+
+        GSM_OTA();
+      }
+    }
 
   _initUI();
   delayMicroseconds(2000000);
@@ -1034,7 +1062,7 @@ void loop() {
   //float x = Read_Meter_float(ID_meter,Reg_Volt);
   //runner.execute();
 
-  if(user_mqtt != ""){
+  if(!user_mqtt.equals("") || !apnStr.equals("") ){
 
     
 
@@ -1149,29 +1177,36 @@ void loop() {
 
     Serial.println();
    
-    if(modem.enableGPS()){
-      Serial.println("Success to enable gps");
-    }else{
-      Serial.println("Fail to enable gps");
+    // Test the GPS functions
+    Serial.println("Enabling GPS/GNSS/GLONASS and waiting 15s for warm-up");
+    modem.enableGPS();
+    delay(15000L);
+  //  float gps_latitude  = 0;
+  //  float gps_longitude = 0;
+  //  float gps_speed     = 0;
+  //  float gps_altitude  = 0;
+  //  int   gps_vsat      = 0;
+  //  int   gps_usat      = 0;
+  //  float gps_accuracy  = 0;
+  //  int   gps_year      = 0;
+  //  int   gps_month     = 0;
+  //  int   gps_day       = 0;
+  //  int   gps_hour      = 0;
+  //  int   gps_minute    = 0;
+  //  int   gps_second    = 0;
+    Serial.println("Requesting current GPS/GNSS/GLONASS location");
+    int i = 0;
+    while (!modem.getGPS(&lat, &lon)) {
+      
+      Serial.println("Couldn't get GPS/GNSS/GLONASS location");
+      i++;
+      if (i == 15){
+        ESP.restart();
+      }
+      delay(15000L);
     }
-        Serial.println();
-
-      // float gps_latitude  = 0;
-      // float gps_longitude = 0;
-
-        Serial.println("Requesting current GPS/GNSS/GLONASS location");
-        if (modem.getGPS(&lat, &lon)) {
-          Serial.printf("Latitude: %s \tLongitude: %s \n", String(lat, 8), String(lon, 8));
-        } else {
-          Serial.println("Couldn't get GPS/GNSS/GLONASS location, retrying in 15s.");
-        }
-          Serial.println();
-      Serial.println("Retrieving GPS/GNSS/GLONASS location again as a string");
-      String gps_raw = modem.getGPSraw();
-      Serial.println("GPS/GNSS Based Location String: " + gps_raw);
-      Serial.println("Disabling GPS");
-
-      modem.disableGPS();
+    Serial.printf("Latitude: %s \t Longitude: %s \n", String(lat, 8), String(lon, 8));
+//  modem.disableGPS();
   }
 
 
