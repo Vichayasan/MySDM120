@@ -23,8 +23,6 @@ const char *magellanServer = "device-entmagellan.ais.co.th"; //"device-entmagell
 #include "SPIFFS.h"
 #include <PubSubClient.h>
 #include <ESPUI.h>
-// #include <MAGELLAN_MQTT.h>
-// #include <BluetoothSerial.h>
 
 #define trigWDTPin    32
 #define ledHeartPIN   0
@@ -75,7 +73,7 @@ String json, deviceToken;
 String digitsOnlyToken = ""; // Create a new string for the digits
 
 // interval sec.
-unsigned long previousMillis, periodOTA, periodGPS, periodMeter, periodDebug;
+unsigned long previousMillis, periodOTA, periodGPS, periodMeter, periodDebug, composeJson;
 uint32_t lastReconnectAttempt = 0;
 
 //loop count
@@ -103,7 +101,7 @@ const char version_url[] = "/Vichayasan/MySDM120/main/bin_version.txt";//"/Vicha
 const char* version_url_WiFiOTA = "https://raw.githubusercontent.com/Vichayasan/MySDM120/main/bin_version.txt";//"https://raw.githubusercontent.com/Vichayasan/BMA/refs/heads/main/TX/bin_version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
 
 String firmware_url;
-String current_version = "0.1.0";
+String current_version = "0.1.3";
 
 
 String user_mqtt = deviceToken;
@@ -124,13 +122,19 @@ void writeEEPROM();
  
 struct Meter
 { 
-  String freq;
-
   String sdmVolt;
   String sdmCurrent;
+  String sdmActivePower;
+  String sdmApparentPower;
+  String sdmReactivePower;
   String sdmPF; //Power factor
-  String sdmWatt;
+  String freq;
   String sdmTotalActiveEnergy;
+  String sdmTotalReactiveEnergy;
+  String sdmMaxTotalPowerDemand;
+  String sdmMaxImportPowerDemand;
+  String sdmMaxExportPowerDemand;
+  String sdmMaxCurDemand;
   int16_t gsmRSSI;
 
 };
@@ -202,13 +206,31 @@ void readMeter() {     // Update read all data
 
     meter.sdmVolt = Read_Meter_float(ID_SDM, Reg_addr[0]);//แสกนหลายตัวตามค่า ID_METER_ALL=X
     meter.sdmCurrent = Read_Meter_float(ID_SDM, Reg_addr[1]);//แสกนหลายตัวตามค่า ID_METER_ALL=X
-    meter.sdmWatt = Read_Meter_float(ID_SDM, Reg_addr[2]);
-    meter.sdmPF = Read_Meter_float(ID_SDM, Reg_addr[3]);
-    meter.freq = Read_Meter_float(ID_SDM, Reg_addr[4]);
-    meter.sdmTotalActiveEnergy = Read_Meter_float(ID_SDM, Reg_addr[5]);
+    meter.sdmActivePower = Read_Meter_float(ID_SDM, Reg_addr[2]);
+    meter.sdmApparentPower = Read_Meter_float(ID_SDM, Reg_addr[3]);
+    meter.sdmReactivePower = Read_Meter_float(ID_SDM, Reg_addr[4]);
+    meter.sdmPF = Read_Meter_float(ID_SDM, Reg_addr[5]);
+    meter.freq = Read_Meter_float(ID_SDM, Reg_addr[6]);
+    meter.sdmTotalActiveEnergy = Read_Meter_float(ID_SDM, Reg_addr[7]);
+    meter.sdmTotalReactiveEnergy = Read_Meter_float(ID_SDM, Reg_addr[8]);
+    meter.sdmMaxTotalPowerDemand = Read_Meter_float(ID_SDM, Reg_addr[9]);
+    meter.sdmMaxImportPowerDemand = Read_Meter_float(ID_SDM, Reg_addr[10]);
+    meter.sdmMaxExportPowerDemand = Read_Meter_float(ID_SDM, Reg_addr[11]);
+    meter.sdmMaxCurDemand = Read_Meter_float(ID_SDM, Reg_addr[12]);
 
     // Serial.println("sdmVolt: " + meter.sdmVolt);
     // Serial.println("sdmCurrent: " + meter.sdmCurrent);
+    // Serial.println("sdmActivePower: " + meter.sdmActivePower);
+    // Serial.println("sdmApparentPower: " + meter.sdmApparentPower );
+    // Serial.println("sdmReactivePower: " + meter.sdmReactivePower);
+    // Serial.println("sdmPF: " + meter.sdmPF);
+    // Serial.println("freq: " + meter.freq);
+    // Serial.println("sdmTotalActiveEnergy: " + meter.sdmTotalActiveEnergy);
+    // Serial.println("sdmTotalReactiveEnergy: " + meter.sdmTotalReactiveEnergy);
+    // Serial.println("sdmMaxTotalPowerDemand: " + meter.sdmMaxTotalPowerDemand);
+    // Serial.println("sdmMaxImportPowerDemand: " + meter.sdmMaxImportPowerDemand);
+    // Serial.println("sdmMaxExportPowerDemand: " + meter.sdmMaxExportPowerDemand);
+    // Serial.println("sdmMaxCurDemand: " + meter.sdmMaxCurDemand);
     // Serial.println("debug get meter 02");
 
 }
@@ -735,7 +757,7 @@ void _initUI(){
       Serial.println(WiFi.getMode()); // Should be 2 (WIFI_AP) when running this
       
       if(connectWifi){
-        WiFi.mode(WIFI_AP_STA); // Should be in STA mode
+        WiFi.mode(WIFI_STA); // Should be in STA mode
       }else{
         WiFi.mode(WIFI_STA);
       }
@@ -747,7 +769,8 @@ void _initUI(){
       } else {
           Serial.println("Failed to start Access Point!");
       }
-
+      Serial.print("AP mode: ");
+      Serial.println(WiFi.getMode());
       Serial.print("AP SSID: ");
       Serial.println(hostUI);
       Serial.print("AP IP Address: ");
@@ -760,8 +783,10 @@ void _initUI(){
 void setUpUI()
 {
   // Serial.println("setUpUI Debug 1");
-
-  // tcpCleanup();
+  if (connectWifi){
+    tcpCleanup();
+  }
+  
 
   // Turn off verbose  ging
   ESPUI.setVerbosity(Verbosity::Quiet);
@@ -1161,11 +1186,11 @@ void setup() {
         mqttWiFi.setCallback(callback);
         // mqttWiFi.setBufferSize(512); // Example: setting buffer to 512 bytes
         // mqttWiFi.setClient(WiFi_client);
-        // mqttWiFi.setKeepAlive(36000);
-        // mqttWiFi.setSocketTimeout(36000);
+        mqttWiFi.setKeepAlive(3600);
+        mqttWiFi.setSocketTimeout(3600);
 
         // You can also add a check to see if the buffer was allocated successfully
-        if (!mqttWiFi.setBufferSize(512)) {
+        if (!mqttWiFi.setBufferSize(1024)) {
           Serial.println("Failed to allocate MQTT buffer");
         }
 
@@ -1188,7 +1213,7 @@ void setup() {
         mqttGSM.setSocketTimeout(3600);
 
         // You can also add a check to see if the buffer was allocated successfully
-        if (!mqttGSM.setBufferSize(512)) {
+        if (!mqttGSM.setBufferSize(1024)) {
           Serial.println("Failed to allocate MQTT buffer");
           // SerialBT.println("Failed to allocate MQTT buffer");
 
@@ -1345,8 +1370,8 @@ void loop() {
 
     }
 
-  if(currentMillis - periodMeter >= 5000){
-    periodMeter = millis();
+  if(currentMillis - periodMeter >= 10000){
+    periodMeter += 10000;
     readMeter() ;
   }
 
@@ -1391,17 +1416,9 @@ void loop() {
 //  modem.disableGPS();
   }
 
+  if (currentMillis - composeJson >= 10000){
+    composeJson += 10000;
 
-  if (currentMillis - previousMillis >= 15000){
-    previousMillis += 15000;
-    // previousMillis = millis();
-    // previousMillis = currentMillis;
-    // Serial.println("debug loop sender 01");
- 
-    //  GET_METER();
-    Serial.println();
-    // digitalWrite(ledHeartPIN, HIGH);
-  
     jsonMsg = "";
 
     jsonMsg.concat("{\"DevicToken\":\"");
@@ -1424,31 +1441,54 @@ void loop() {
       jsonMsg.concat(debug.DBm);
     }
     jsonMsg.concat(",\"Lat\":");
-    jsonMsg.concat(String(lat, 8));
+    jsonMsg.concat(String(13.78345144875754, 8));
     jsonMsg.concat(",\"Lon\":");
-    jsonMsg.concat(String(lon, 8));
+    jsonMsg.concat(String(100.54649560000001, 8));
     jsonMsg.concat(",\"vol\":");
     jsonMsg.concat(meter.sdmVolt);
     jsonMsg.concat(",\"cur\":");
     jsonMsg.concat(meter.sdmCurrent);
-    jsonMsg.concat(",\"watt\":");
-    jsonMsg.concat(meter.sdmWatt);
+    jsonMsg.concat(",\"sdmActivePower\":");
+    jsonMsg.concat(meter.sdmActivePower);
+    jsonMsg.concat(",\"sdmApparentPower\":");
+    jsonMsg.concat(meter.sdmApparentPower);
+    jsonMsg.concat(",\"sdmReactivePower\":");
+    jsonMsg.concat(meter.sdmReactivePower);
     jsonMsg.concat(",\"pf\":");
     jsonMsg.concat(meter.sdmPF);
     jsonMsg.concat(",\"f\":");
     jsonMsg.concat(meter.freq);
     jsonMsg.concat(",\"totalactivepower\":");
     jsonMsg.concat(meter.sdmTotalActiveEnergy);
+    jsonMsg.concat(",\"sdmTotalReactiveEnergy\":");
+    jsonMsg.concat(meter.sdmTotalReactiveEnergy);
+    jsonMsg.concat(",\"sdmMaxTotalPowerDemand\":");
+    jsonMsg.concat(meter.sdmMaxTotalPowerDemand);
+    jsonMsg.concat(",\"sdmMaxImportPowerDemand\":");
+    jsonMsg.concat(meter.sdmMaxImportPowerDemand);
+    jsonMsg.concat(",\"sdmMaxExportPowerDemand\":");
+    jsonMsg.concat(meter.sdmMaxExportPowerDemand);
+    jsonMsg.concat(",\"sdmMaxCurDemand\":");
+    jsonMsg.concat(meter.sdmMaxCurDemand);
     jsonMsg.concat("}");
     // Serial.println(jsonMsg);
+  }
 
+  if (currentMillis - previousMillis >= 15000){
+    previousMillis += 15000;
+    // previousMillis = millis();
+    // previousMillis = currentMillis;
+    // Serial.println("debug loop sender 01");
+ 
+    //  GET_METER();
+    Serial.println();
+    // digitalWrite(ledHeartPIN, HIGH);
 
     int str_len = jsonMsg.length() + 1;
 
-    // Serial.println();
-    // Serial.printf("str_len: %d \n", str_len);
-    // Serial.println();
-
+    Serial.println();
+    Serial.printf("str_len: %d \n", str_len);
+    Serial.println();
 
     char char_array[str_len];
     jsonMsg.toCharArray(char_array, str_len);
