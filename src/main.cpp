@@ -101,7 +101,7 @@ const char version_url[] = "/Vichayasan/MySDM120/main/bin_version.txt";//"/Vicha
 const char* version_url_WiFiOTA = "https://raw.githubusercontent.com/Vichayasan/MySDM120/main/bin_version.txt";//"https://raw.githubusercontent.com/Vichayasan/BMA/refs/heads/main/TX/bin_version.txt"; // "/IndustrialArduino/OTA-on-ESP/release/version.txt";  https://raw.githubusercontent.com/:owner/:repo/master/:path
 
 String firmware_url;
-String current_version = "0.1.3";
+String current_version = "0.1.5";
 
 
 String user_mqtt = deviceToken;
@@ -664,16 +664,20 @@ boolean reconnectGSMMqtt()
     // Serial.println(" fail");
     debug.magelCon = "fail";
     digitalWrite(ledHeartPIN, LOW);
+    
     // return false;
   }else{
+    // Serial.println(" fail");
     debug.magelCon = "success";
     digitalWrite(ledHeartPIN, HIGH);
     // return true;
   }
-  // Serial.println(" ...success");
+  Serial.print(" ...");
   // Serial.println(F("Connect MQTT Success."));
   // String AAA = "thing";
   // mqttWiFi.subscribe(("api/v2/thing/"+ key + "/" + secret + "/auth/resp").c_str());
+  mqttGSM.state();
+  Serial.println(debug.magelCon);
   return mqttGSM.connected();
 }
 
@@ -1044,6 +1048,64 @@ int mapRSSIToDBm(int rssi)
   }
 }
 
+void JsonCompose(){
+
+  jsonMsg = "";
+
+    jsonMsg.concat("{\"DevicToken\":\"");
+    jsonMsg.concat(deviceToken);
+    jsonMsg.concat("\",\"ccid\":\"");
+    jsonMsg.concat(debug.simInfo);
+    jsonMsg.concat("\",\"ClientID\":\"");
+    jsonMsg.concat(user_mqtt);
+    jsonMsg.concat("\",\"version\":\"");
+    jsonMsg.concat(current_version);
+    if (connectWifi){
+      jsonMsg.concat("\",\"Network\":\"");
+      jsonMsg.concat("Wi-Fi");
+      jsonMsg.concat("\",\"WiFi_RSSI\":");
+      jsonMsg.concat(debug.DBm);
+    }else{
+      jsonMsg.concat("\",\"Network\":\"");
+      jsonMsg.concat("GSM");
+      jsonMsg.concat("\",\"GSM_DBm\":");
+      jsonMsg.concat(debug.DBm);
+    }
+    jsonMsg.concat(",\"Lat\":");
+    jsonMsg.concat(String(13.78345144875754, 8));
+    jsonMsg.concat(",\"Lon\":");
+    jsonMsg.concat(String(100.54649560000001, 8));
+    jsonMsg.concat(",\"vol\":");
+    jsonMsg.concat(meter.sdmVolt);
+    jsonMsg.concat(",\"cur\":");
+    jsonMsg.concat(meter.sdmCurrent);
+    jsonMsg.concat(",\"ActivePower\":");
+    jsonMsg.concat(meter.sdmActivePower);
+    jsonMsg.concat(",\"ApparentPower\":");
+    jsonMsg.concat(meter.sdmApparentPower);
+    jsonMsg.concat(",\"ReactivePower\":");
+    jsonMsg.concat(meter.sdmReactivePower);
+    jsonMsg.concat(",\"pf\":");
+    jsonMsg.concat(meter.sdmPF);
+    jsonMsg.concat(",\"f\":");
+    jsonMsg.concat(meter.freq);
+    jsonMsg.concat(",\"totalactivepower\":");
+    jsonMsg.concat(meter.sdmTotalActiveEnergy);
+    jsonMsg.concat(",\"TotalReactiveEnergy\":");
+    jsonMsg.concat(meter.sdmTotalReactiveEnergy);
+    jsonMsg.concat(",\"MaxTotalPowerDemand\":");
+    jsonMsg.concat(meter.sdmMaxTotalPowerDemand);
+    jsonMsg.concat(",\"MaxImportPowerDemand\":");
+    jsonMsg.concat(meter.sdmMaxImportPowerDemand);
+    jsonMsg.concat(",\"MaxExportPowerDemand\":");
+    jsonMsg.concat(meter.sdmMaxExportPowerDemand);
+    jsonMsg.concat(",\"MaxCurDemand\":");
+    jsonMsg.concat(meter.sdmMaxCurDemand);
+    jsonMsg.concat("}");
+    Serial.println(jsonMsg);
+  
+}
+
 //**************************************************************************************************************
 void setup() {
 
@@ -1208,7 +1270,7 @@ void setup() {
         mqttGSM.setServer(magellanServer, 8883);
         mqttGSM.setCallback(callback);
         // mqttGSM.setBufferSize(512); // Example: setting buffer to 512 bytes
-        // mqttGSM.setClient(gsm_mqtt_client);
+        mqttGSM.setClient(gsm_mqtt_client);
         mqttGSM.setKeepAlive(3600);
         mqttGSM.setSocketTimeout(3600);
 
@@ -1419,59 +1481,7 @@ void loop() {
   if (currentMillis - composeJson >= 10000){
     composeJson += 10000;
 
-    jsonMsg = "";
-
-    jsonMsg.concat("{\"DevicToken\":\"");
-    jsonMsg.concat(deviceToken);
-    jsonMsg.concat("\",\"ccid\":\"");
-    jsonMsg.concat(debug.simInfo);
-    jsonMsg.concat("\",\"ClientID\":\"");
-    jsonMsg.concat(user_mqtt);
-    jsonMsg.concat("\",\"version\":\"");
-    jsonMsg.concat(current_version);
-    if (connectWifi){
-      jsonMsg.concat("\",\"Network\":\"");
-      jsonMsg.concat("Wi-Fi");
-      jsonMsg.concat("\",\"WiFi_RSSI\":");
-      jsonMsg.concat(debug.DBm);
-    }else{
-      jsonMsg.concat("\",\"Network\":\"");
-      jsonMsg.concat("GSM");
-      jsonMsg.concat("\",\"GSM_DBm\":");
-      jsonMsg.concat(debug.DBm);
-    }
-    jsonMsg.concat(",\"Lat\":");
-    jsonMsg.concat(String(13.78345144875754, 8));
-    jsonMsg.concat(",\"Lon\":");
-    jsonMsg.concat(String(100.54649560000001, 8));
-    jsonMsg.concat(",\"vol\":");
-    jsonMsg.concat(meter.sdmVolt);
-    jsonMsg.concat(",\"cur\":");
-    jsonMsg.concat(meter.sdmCurrent);
-    jsonMsg.concat(",\"sdmActivePower\":");
-    jsonMsg.concat(meter.sdmActivePower);
-    jsonMsg.concat(",\"sdmApparentPower\":");
-    jsonMsg.concat(meter.sdmApparentPower);
-    jsonMsg.concat(",\"sdmReactivePower\":");
-    jsonMsg.concat(meter.sdmReactivePower);
-    jsonMsg.concat(",\"pf\":");
-    jsonMsg.concat(meter.sdmPF);
-    jsonMsg.concat(",\"f\":");
-    jsonMsg.concat(meter.freq);
-    jsonMsg.concat(",\"totalactivepower\":");
-    jsonMsg.concat(meter.sdmTotalActiveEnergy);
-    jsonMsg.concat(",\"sdmTotalReactiveEnergy\":");
-    jsonMsg.concat(meter.sdmTotalReactiveEnergy);
-    jsonMsg.concat(",\"sdmMaxTotalPowerDemand\":");
-    jsonMsg.concat(meter.sdmMaxTotalPowerDemand);
-    jsonMsg.concat(",\"sdmMaxImportPowerDemand\":");
-    jsonMsg.concat(meter.sdmMaxImportPowerDemand);
-    jsonMsg.concat(",\"sdmMaxExportPowerDemand\":");
-    jsonMsg.concat(meter.sdmMaxExportPowerDemand);
-    jsonMsg.concat(",\"sdmMaxCurDemand\":");
-    jsonMsg.concat(meter.sdmMaxCurDemand);
-    jsonMsg.concat("}");
-    // Serial.println(jsonMsg);
+    
   }
 
   if (currentMillis - previousMillis >= 15000){
@@ -1481,6 +1491,7 @@ void loop() {
     // Serial.println("debug loop sender 01");
  
     //  GET_METER();
+    JsonCompose();
     Serial.println();
     // digitalWrite(ledHeartPIN, HIGH);
 
@@ -1522,7 +1533,11 @@ void loop() {
       // Serial.println((resultSub)? "Sending via GSM SUCCESS" : "Sending via GSM FAIL");
       // Serial.println("debug loop sender GSM 03");
       resultSub = mqttGSM.publish(topic.c_str(), char_array, str_len);
-      Serial.print("[Status report]: ");
+      // Serial.print("[Status report]: ");
+      // Serial.print("Sending via GSM \t");
+      // if (resultSub){
+      //   Serial.println("SUCCESS");
+      // }
       Serial.println((resultSub)? "Sending via GSM SUCCESS" : "Sending via GSM FAIL");
 
     }
