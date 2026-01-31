@@ -768,7 +768,7 @@ void _initUI(){
       
       WiFi.softAPConfig(IPAddress(192, 168, 1, 1), IPAddress(192, 168, 1, 1), IPAddress(255, 255, 255, 0));
 
-      if (WiFi.softAP(hostUI.c_str(), "green7650")) {
+      if (WiFi.softAP(hostUI.c_str(), "*********")) {
           Serial.println("Access Point started successfully!");
       } else {
           Serial.println("Failed to start Access Point!");
@@ -1598,3 +1598,4 @@ void HeartBeat() {
   Serial.println("Heartbeat sent");
   
 }
+
